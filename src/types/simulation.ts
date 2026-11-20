@@ -41,9 +41,12 @@ export interface NrpPreset {
   rhythm: CardiacRhythm;
 }
 
+export type ThemeMode = 'light' | 'dark';
+
 export interface RecordedClip {
   id: string;
   url: string;
+  baseName: string;
   filename: string;
   durationSec: number;
   sizeBytes: number;

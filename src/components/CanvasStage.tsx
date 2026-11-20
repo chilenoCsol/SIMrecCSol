@@ -37,6 +37,7 @@ interface CanvasStageProps {
   soundEnabled: boolean;
   activeBanner: CanvasMilestoneBanner | null;
   liveVitalsSnapshotRef: React.MutableRefObject<VitalParams>;
+  isLightMode?: boolean;
 }
 
 export const CanvasStage: React.FC<CanvasStageProps> = ({
@@ -56,6 +57,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   soundEnabled,
   activeBanner,
   liveVitalsSnapshotRef,
+  isLightMode = false,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const waveformRef = useRef(createWaveformEngineState());
@@ -209,7 +211,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   }, [canvasRef]);
 
   return (
-    <div className="relative w-full bg-[#05080D] border border-slate-800 rounded-lg overflow-hidden">
+    <div
+      className={`relative w-full bg-[#05080D] border rounded-lg overflow-hidden ${
+        isLightMode ? 'border-slate-300 shadow-sm' : 'border-slate-800'
+      }`}
+    >
       {/* Hidden source video element fed by getUserMedia */}
       <video
         ref={videoRef}

@@ -164,14 +164,15 @@ function triggerTextFileDownload(content: string, filename: string, mimeType: st
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function downloadDebriefCsv(events: DebriefEvent[], currentTimerSec: number): void {
+export function downloadDebriefCsv(
+  events: DebriefEvent[],
+  currentTimerSec: number,
+  customFilename?: string
+): void {
   const csv = buildDebriefCsvReport(events, currentTimerSec);
   const stamp = buildExportStamp(new Date());
-  triggerTextFileDownload(
-    csv,
-    `SimRec-SOCHIPE-Bitacora-${stamp}.csv`,
-    'text/csv;charset=utf-8'
-  );
+  const filename = customFilename ?? `SimRec_NRP_${stamp}_eventos.csv`;
+  triggerTextFileDownload(csv, filename, 'text/csv;charset=utf-8');
 }
 
 export function downloadDebriefTxt(events: DebriefEvent[], currentTimerSec: number): void {
@@ -179,7 +180,7 @@ export function downloadDebriefTxt(events: DebriefEvent[], currentTimerSec: numb
   const stamp = buildExportStamp(new Date());
   triggerTextFileDownload(
     txt,
-    `SimRec-SOCHIPE-Bitacora-${stamp}.txt`,
+    `SimRec_NRP_${stamp}_bitacora.txt`,
     'text/plain;charset=utf-8'
   );
 }

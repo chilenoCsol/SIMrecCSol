@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Moon, Sun } from 'lucide-react';
 import { CanvasStage } from './components/CanvasStage';
+import { DebriefEventLogger } from './components/DebriefEventLogger';
 import { InstructorPanel } from './components/InstructorPanel';
+import { MonitorAudioBar } from './components/MonitorAudioBar';
 import { RecordingToolbar } from './components/RecordingToolbar';
 import { StudentMonitorView } from './components/StudentMonitorView';
 import { NRP_PRESETS } from './data/nrpPresets';
@@ -20,17 +23,33 @@ import {
   RecordedClip,
   RecordingState,
   SensorConnections,
+  ThemeMode,
   TransitionDurationSec,
   VitalParams,
 } from './types/simulation';
 import { ALARM_SILENCE_DURATION_MS, clinicalAudioCue } from './utils/audioCue';
 import { findMatchingMicForCamera } from './utils/audioDeviceMatcher';
+import { downloadDebriefCsv } from './utils/debriefExport';
 import { formatTimerMMSS } from './utils/hudRenderer';
 import {
   computeActiveClinicalAlerts,
   createMonitorChannel,
   publishMonitorState,
 } from './utils/monitorSync';
+
+const THEME_STORAGE_KEY = 'simrec_theme';
+
+function loadSavedTheme(): ThemeMode {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark') {
+      return stored;
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return 'dark';
+}
 
 const AMBIENT_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   echoCancellation: false,
@@ -72,13 +91,17 @@ function describeVideoFormat(mimeType: string): string {
   return 'WebM';
 }
 
-function buildClipFilename(mimeType: string): string {
+function buildClipBaseName(): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}-${pad(now.getMinutes())}`;
+  return `SimRec_NRP_${datePart}_${timePart}`;
+}
+
+function buildClipFilename(baseName: string, mimeType: string): string {
   const ext = mimeType.toLowerCase().includes('mp4') ? 'mp4' : 'webm';
-  return `SimRec_SOCHIPE_${datePart}_${timePart}.${ext}`;
+  return `${baseName}.${ext}`;
 }
 
 function isStudentMonitorMode(): boolean {
@@ -105,6 +128,30 @@ function InstructorRecorderApp() {
   const monitorChannelRef = useRef<BroadcastChannel | null>(null);
   const studentWindowRef = useRef<Window | null>(null);
   const timerSecondsRef = useRef<number>(0);
+
+  // Explicit boolean Light/Dark theme state persisted in localStorage — affects Instructor Panel only
+  const [isLightMode, setIsLightMode] = useState<boolean>(() => loadSavedTheme() === 'light');
+
+  // Sync data-theme attribute on documentElement for slider/scrollbar/page base styling (never runs in StudentMonitorView)
+  useEffect(() => {
+    const mode: ThemeMode = isLightMode ? 'light' : 'dark';
+    document.documentElement.dataset.theme = mode;
+    return () => {
+      delete document.documentElement.dataset.theme;
+    };
+  }, [isLightMode]);
+
+  const handleToggleTheme = useCallback(() => {
+    setIsLightMode((prev) => {
+      const nextIsLight = !prev;
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, nextIsLight ? 'light' : 'dark');
+      } catch {
+        // Ignore storage write errors
+      }
+      return nextIsLight;
+    });
+  }, []);
 
   // Media devices state (cameras + microphones)
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
@@ -208,9 +255,10 @@ function InstructorRecorderApp() {
 
   // Critical debriefing event log & optional 3-second video banner
   const [debriefEvents, setDebriefEvents] = useState<DebriefEvent[]>([]);
+  const debriefEventsRef = useRef<DebriefEvent[]>(debriefEvents);
+  debriefEventsRef.current = debriefEvents;
   const [showBannerInVideo, setShowBannerInVideo] = useState<boolean>(true);
   const [activeBanner, setActiveBanner] = useState<CanvasMilestoneBanner | null>(null);
-  const [debriefFocusTrigger, setDebriefFocusTrigger] = useState<number>(0);
   const liveVitalsSnapshotRef = useRef<VitalParams>({
     hr: NRP_PRESETS[0].hr,
     spo2: NRP_PRESETS[0].spo2,
@@ -877,13 +925,25 @@ function InstructorRecorderApp() {
     [commitTargetVitals]
   );
 
-  const triggerClipDownload = useCallback((clip: RecordedClip) => {
+  /**
+   * Downloads the recorded video file (.mp4 / .webm) and, after a 300ms pause so browsers
+   * do not block simultaneous downloads, exports the paired UTF-8 BOM debriefing events CSV
+   * sharing the exact same SimRec_NRP_YYYY-MM-DD_HH-MM base name.
+   */
+  const triggerClipWithEventsDownload = useCallback((clip: RecordedClip) => {
     const a = document.createElement('a');
     a.href = clip.url;
     a.download = clip.filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+
+    const pairedCsvName = `${clip.baseName}_eventos.csv`;
+    const eventsSnapshot = debriefEventsRef.current;
+    const durationSnapshot = Math.max(timerSecondsRef.current, clip.durationSec);
+    window.setTimeout(() => {
+      downloadDebriefCsv(eventsSnapshot, durationSnapshot, pairedCsvName);
+    }, 300);
   }, []);
 
   // MediaRecorder: Canvas 30fps video tracks + explicit live Microphone audio tracks
@@ -975,7 +1035,8 @@ function InstructorRecorderApp() {
         const finalMime = recorder.mimeType || activeMime || 'video/webm';
         const blob = new Blob(recordedChunksRef.current, { type: finalMime });
         const url = URL.createObjectURL(blob);
-        const filename = buildClipFilename(finalMime);
+        const baseName = buildClipBaseName();
+        const filename = buildClipFilename(baseName, finalMime);
         const formatLabel = describeVideoFormat(finalMime);
         const createdAt = new Date().toLocaleTimeString('es-ES', {
           hour: '2-digit',
@@ -987,6 +1048,7 @@ function InstructorRecorderApp() {
         const clip: RecordedClip = {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           url,
+          baseName,
           filename,
           durationSec: clipDurationAccumRef.current,
           sizeBytes: blob.size,
@@ -996,7 +1058,7 @@ function InstructorRecorderApp() {
         };
 
         setClips((prev) => [clip, ...prev]);
-        triggerClipDownload(clip);
+        triggerClipWithEventsDownload(clip);
 
         // Stop only synthetic canvas video capture tracks (keep live mic stream alive for next take)
         canvasStream.getTracks().forEach((t) => t.stop());
@@ -1025,7 +1087,7 @@ function InstructorRecorderApp() {
         'No se pudo iniciar MediaRecorder. Verifica los permisos de micrófono o prueba en Chrome/Edge/Firefox.'
       );
     }
-  }, [micAutoMatched, micEnabled, selectedMicId, startAudioCapture, triggerClipDownload]);
+  }, [micAutoMatched, micEnabled, selectedMicId, startAudioCapture, triggerClipWithEventsDownload]);
 
   const handlePauseRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -1311,17 +1373,39 @@ function InstructorRecorderApp() {
   };
 
   return (
-    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-[#080C12] text-slate-100 flex flex-col">
-      {/* Slim Clinical Top Bar */}
-      <header className="shrink-0 border-b border-slate-800/90 bg-[#0B1019] px-4 py-2 flex items-center justify-between gap-4">
+    <div
+      data-theme={isLightMode ? 'light' : 'dark'}
+      className={`min-h-screen lg:h-screen lg:overflow-hidden flex flex-col transition-colors ${
+        isLightMode ? 'bg-[#F1F5F9] text-slate-900' : 'bg-[#080C12] text-slate-100'
+      }`}
+    >
+      {/* Slim Clinical Top Bar with Light/Dark Theme Switch */}
+      <header
+        className={`shrink-0 border-b px-4 py-1.5 flex items-center justify-between gap-4 transition-colors ${
+          isLightMode
+            ? 'bg-white border-slate-300 shadow-xs'
+            : 'bg-[#0B1019] border-slate-800/90'
+        }`}
+      >
         <div className="flex items-baseline gap-2.5 min-w-0">
-          <h1 className="text-sm sm:text-base font-bold tracking-tight text-slate-100 whitespace-nowrap truncate">
+          <h1
+            className={`text-sm sm:text-base font-bold tracking-tight whitespace-nowrap truncate ${
+              isLightMode ? 'text-slate-900' : 'text-slate-100'
+            }`}
+          >
             SimRec Neonatal HUD SOCHIPE
           </h1>
-          <span className="text-slate-600 hidden sm:inline" aria-hidden="true">
+          <span
+            className={`hidden sm:inline ${isLightMode ? 'text-slate-400' : 'text-slate-600'}`}
+            aria-hidden="true"
+          >
             ·
           </span>
-          <span className="text-[11px] text-slate-400 whitespace-nowrap hidden sm:inline">
+          <span
+            className={`text-[11px] whitespace-nowrap hidden sm:inline ${
+              isLightMode ? 'text-slate-600' : 'text-slate-400'
+            }`}
+          >
             Mat. Carlos Solar O.
           </span>
         </div>
@@ -1331,9 +1415,15 @@ function InstructorRecorderApp() {
             <span
               className={
                 isAlarmSilenced
-                  ? 'text-amber-300'
+                  ? isLightMode
+                    ? 'text-amber-700 font-semibold'
+                    : 'text-amber-300 font-semibold'
                   : alarmPriority === 'high'
-                  ? 'text-red-400 font-semibold'
+                  ? isLightMode
+                    ? 'text-red-600 font-semibold'
+                    : 'text-red-400 font-semibold'
+                  : isLightMode
+                  ? 'text-amber-700 font-semibold'
                   : 'text-amber-300 font-semibold'
               }
             >
@@ -1344,25 +1434,71 @@ function InstructorRecorderApp() {
                 : '▲ Alarma Media'}
             </span>
           )}
-          <span className="text-slate-400 whitespace-nowrap">
+
+          <span
+            className={`whitespace-nowrap hidden md:inline ${
+              isLightMode ? 'text-slate-600' : 'text-slate-400'
+            }`}
+          >
             {recordingState === 'recording' ? (
-              <span className="text-red-400 font-semibold">● Grabando HD</span>
+              <span className={isLightMode ? 'text-red-600 font-semibold' : 'text-red-400 font-semibold'}>
+                ● Grabando HD
+              </span>
             ) : recordingState === 'paused' ? (
-              <span className="text-amber-300 font-semibold">❚❚ Pausado</span>
+              <span
+                className={
+                  isLightMode ? 'text-amber-700 font-semibold' : 'text-amber-300 font-semibold'
+                }
+              >
+                ❚❚ Pausado
+              </span>
             ) : hasVideoFeed ? (
               hasMicTrack && micEnabled ? 'Cámara + Mic · 720p' : 'Cámara · Sin mic'
             ) : (
               'Visor clínico · 720p'
             )}
           </span>
+
+          {/* Quick Light / Dark Mode Switch */}
+          <button
+            type="button"
+            onClick={handleToggleTheme}
+            title={
+              isLightMode
+                ? 'Cambiar a Modo Oscuro clínico'
+                : 'Cambiar a Modo Claro para salas bien iluminadas'
+            }
+            className={`h-7 px-2.5 inline-flex items-center gap-1.5 rounded-md border font-sans text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              isLightMode
+                ? 'border-slate-300 bg-slate-100 text-slate-900 hover:bg-slate-200'
+                : 'border-slate-700 bg-[#141C2B] text-slate-100 hover:bg-slate-800'
+            }`}
+          >
+            {isLightMode ? (
+              <>
+                <Moon className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                <span>Modo Oscuro</span>
+              </>
+            ) : (
+              <>
+                <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Modo Claro</span>
+              </>
+            )}
+          </button>
         </div>
       </header>
 
       {/* Zero-Scroll Desktop Split Workspace (Stacks vertically on mobile/portrait tablets) */}
       <main className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
-        {/* COLUMNA IZQUIERDA (46%): Panel de Control Compacto con scroll interno independiente */}
-        <div className="w-full lg:w-[46%] xl:w-[46%] lg:h-full flex flex-col min-h-0 border-b lg:border-b-0 lg:border-r border-slate-800/90">
+        {/* COLUMNA IZQUIERDA (44%): Parámetros Vitales + Escenarios NRP + Dispositivos */}
+        <div
+          className={`w-full lg:w-[44%] xl:w-[43%] lg:h-full flex flex-col min-h-0 border-b lg:border-b-0 lg:border-r ${
+            isLightMode ? 'border-slate-300' : 'border-slate-800/90'
+          }`}
+        >
           <InstructorPanel
+            isLightMode={isLightMode}
             vitals={vitals}
             targetVitals={targetVitals}
             sensors={sensors}
@@ -1399,6 +1535,19 @@ function InstructorRecorderApp() {
             isRequestingCamera={isRequestingCamera}
             onRequestCamera={() => void startCameraCapture(selectedCameraId || undefined)}
             recordingState={recordingState}
+          />
+        </div>
+
+        {/* COLUMNA DERECHA (56%): Audio Monitor -> Visor 16:9 -> Barra Compacta -> Botonera Eventos + Bitácora */}
+        <section
+          aria-label="Audio del monitor, visor de video, controles de grabación y registro de eventos"
+          className={`w-full lg:w-[56%] xl:w-[57%] lg:h-full flex flex-col min-h-0 p-2.5 sm:p-3 gap-2 transition-colors ${
+            isLightMode ? 'bg-[#F1F5F9]' : 'bg-[#080C12]'
+          }`}
+        >
+          {/* 1. Controles de Audio del Monitor directamente encima del visor de video */}
+          <MonitorAudioBar
+            isLightMode={isLightMode}
             soundEnabled={soundEnabled}
             audioVolume={audioVolume}
             alarmPriority={alarmPriority}
@@ -1407,28 +1556,13 @@ function InstructorRecorderApp() {
             onToggleSound={handleToggleSound}
             onChangeAudioVolume={handleChangeAudioVolume}
             onToggleSilenceAlarm={handleToggleSilenceAlarm}
-            debriefEvents={debriefEvents}
-            timerSeconds={timerSeconds}
-            showBannerInVideo={showBannerInVideo}
-            onToggleShowBanner={handleToggleShowBanner}
-            onLogMilestone={handleLogMilestone}
-            onLogCustomNote={handleLogCustomNote}
-            onUpdateDebriefEvent={handleUpdateDebriefEvent}
-            onDeleteDebriefEvent={handleDeleteDebriefEvent}
-            onClearDebriefEvents={handleClearDebriefEvents}
-            debriefFocusTrigger={debriefFocusTrigger}
           />
-        </div>
 
-        {/* COLUMNA DERECHA (54%): Visor de Video Compacto 16:9 + Barra de Acción Fija y Últimos 3 Eventos */}
-        <section
-          aria-label="Visor de video y controles de grabación"
-          className="w-full lg:w-[54%] xl:w-[54%] lg:h-full flex flex-col min-h-0 p-3 sm:p-4 gap-2.5 bg-[#080C12]"
-        >
-          {/* Proportional 16:9 Canvas Container constrained to stay eye-level inside 100vh while keeping 1280x720 internal export resolution */}
+          {/* 2. Visor de Video HD 16:9 (siempre en negro clínico para máxima legibilidad de ondas y MP4) */}
           <div className="w-full flex items-center justify-center shrink-0">
-            <div className="w-full lg:max-w-[min(100%,calc((100vh-305px)*16/9))]">
+            <div className="w-full lg:max-w-[min(100%,calc(37vh*16/9))]">
               <CanvasStage
+                isLightMode={isLightMode}
                 canvasRef={canvasRef}
                 mediaStream={videoStream}
                 hasVideoFeed={hasVideoFeed}
@@ -1449,8 +1583,9 @@ function InstructorRecorderApp() {
             </div>
           </div>
 
-          {/* Fixed Action Bar: Large MM:SS Stopwatch + Recording Transport + Compact Last 3 Events Viewer */}
+          {/* 3. Barra Compacta de Cronómetro, Grabación, Reinicio y Descarga Conjunta MP4 + Eventos */}
           <RecordingToolbar
+            isLightMode={isLightMode}
             recordingState={recordingState}
             timerSeconds={timerSeconds}
             timerRunning={timerRunning}
@@ -1469,9 +1604,22 @@ function InstructorRecorderApp() {
             onResetTimer={handleResetTimer}
             onToggleTimerStandalone={handleToggleTimerStandalone}
             onResetScenario={handleResetScenario}
-            onDownloadClip={triggerClipDownload}
+            onDownloadClipWithEvents={triggerClipWithEventsDownload}
             onDeleteClip={handleDeleteClip}
-            onOpenDebriefLog={() => setDebriefFocusTrigger((n) => n + 1)}
+          />
+
+          {/* 4. Módulo Completo de Registro de Eventos para Debriefing (Grilla Compacta 3 Cols + Bitácora) */}
+          <DebriefEventLogger
+            isLightMode={isLightMode}
+            events={debriefEvents}
+            timerSeconds={timerSeconds}
+            showBannerInVideo={showBannerInVideo}
+            onToggleShowBanner={handleToggleShowBanner}
+            onLogMilestone={handleLogMilestone}
+            onLogCustomNote={handleLogCustomNote}
+            onUpdateEvent={handleUpdateDebriefEvent}
+            onDeleteEvent={handleDeleteDebriefEvent}
+            onClearEvents={handleClearDebriefEvents}
           />
         </section>
       </main>
